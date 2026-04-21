@@ -4,11 +4,5 @@ compatibility_date = "2024-06-20"
 account_id = "e86527afe6de4dc0540cd25c9723f10c"
 
 [vars]
-MINIMAX_API_KEY = ""
-MINIMAX_API_BASE = "https://api.minimax.chat"
 GOOGLE_DOCS_DOCUMENT_ID = "1Dn4U45QfY9Bonb96g5G-wWoE5wvB9qj2"
 WEBHOOK_SECRET = "osha-line-bot-secret-2024"
-
-routes = [
-  { pattern = "osha.eric020730.com", zone_name = "eric020730.com" }
-]
