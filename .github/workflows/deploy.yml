@@ -1,4 +1,4 @@
-name: Deploy OSHA Telegram Bot
+name: Deploy OSHA LINE Bot
 
 on:
   push:
@@ -30,15 +30,8 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           args: --env production
-      
-      - name: Set Telegram Webhook
-        run: |
-          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/setWebhook" \
-            -d "url=${{ secrets.WEBHOOK_URL }}/webhook" \
-            -d "secret_token=${{ secrets.WEBHOOK_SECRET }}"
-    
+
   deploy-vercel:
-    needs: deploy-cloudflare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

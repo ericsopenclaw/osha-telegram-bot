@@ -1,31 +1,37 @@
 /**
- * 職安自動檢查與法規顧問 Telegram Bot - Cloudflare Worker
+ * 職安自動檢查與法規顧問 LINE Bot - Cloudflare Worker
  * 使用 MiniMax API 進行文字問答與圖片辨識
  */
 
 interface Env {
-  TELEGRAM_BOT_TOKEN: string;
+  LINE_CHANNEL_ACCESS_TOKEN: string;
+  LINE_CHANNEL_SECRET: string;
   MINIMAX_API_KEY: string;
   MINIMAX_API_BASE: string;
   GOOGLE_DOCS_DOCUMENT_ID: string;
+  WEBHOOK_SECRET: string;
   OSHA_KV: KVNamespace;
 }
 
-interface TelegramUpdate {
-  update_id: number;
-  message?: {
-    message_id: number;
-    from: { id: number; first_name: string };
-    chat: { id: number; type: string };
-    text?: string;
-    photo?: { file_id: string; width: number; height: number }[];
-    date: number;
+interface LINEWebhookEvent {
+  type: string;
+  webhookEventId: string;
+  deliveryContext: { isRedelivery: boolean };
+  timestamp: number;
+  source: {
+    type: string;
+    userId?: string;
+    groupId?: string;
+    roomId?: string;
   };
-  callback_query?: {
+  replyToken?: string;
+  mode?: string;
+  message?: {
+    type: string;
     id: string;
-    from: { id: number };
-    message: { chat: { id: number }; text: string };
-    data: string;
+    quoteToken?: string;
+    text?: string;
+    contentProvider?: { type: string; originalContentUrl?: string; previewImageUrl?: string };
   };
 }
 
@@ -122,15 +128,7 @@ ${context}`;
 // ============ Google Docs API ============
 async function fetchGoogleDocsContent(env: Env): Promise<string> {
   try {
-    // 使用 Google Apps Script 樣式 endpoint 獲取文件內容
-    // 或者使用 Google Docs API
     const docId = env.GOOGLE_DOCS_DOCUMENT_ID;
-    
-    // 嘗試通過 Google Docs API 獲取內容
-    const url = `https://docs.googleapis.com/v1/documents/${docId}`;
-    
-    // 注意：實際部署需要設置 GOOGLE_SERVICE_ACCOUNT_KEY 或使用 OAuth
-    // 這裡使用模擬的知識庫內容作為回退
     const mockContent = `
 職安法規要點：
 
@@ -155,7 +153,6 @@ async function fetchGoogleDocsContent(env: Env): Promise<string> {
 
 5. 消防設施
    - 施工現場應設置滅火器
-   - 每多少平方公尺應設置一具
     `;
     
     return mockContent;
@@ -165,136 +162,138 @@ async function fetchGoogleDocsContent(env: Env): Promise<string> {
   }
 }
 
-// ============ Telegram API ============
-async function sendTelegramMessage(chatId: number, text: string, env: Env): Promise<void> {
-  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+// ============ LINE API ============
+async function replyToLINE(replyToken: string, messages: any[], env: Env): Promise<void> {
+  const url = "https://api.line.me/v2/bot/message/reply";
   
-  await fetch(url, {
+  const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${env.LINE_CHANNEL_ACCESS_TOKEN}`,
+    },
     body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
+      replyToken,
+      messages,
     }),
   });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`LINE API error: ${response.status} - ${errorText}`);
+  }
 }
 
-async function sendTelegramPhoto(chatId: number, photoUrl: string, caption: string, env: Env): Promise<void> {
-  // 先獲取 photo file_id
-  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`;
+async function getLINEFileContent(messageId: string, env: Env): Promise<ArrayBuffer> {
+  const url = `https://api-data.line.me/v2/bot/message/${messageId}/content`;
   
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      photo: photoUrl,
-      caption,
-      parse_mode: "HTML",
-    }),
+  const response = await fetch(url, {
+    headers: {
+      "Authorization": `Bearer ${env.LINE_CHANNEL_ACCESS_TOKEN}`,
+    },
   });
-}
 
-async function answerCallbackQuery(callbackQueryId: string, text: string, env: Env): Promise<void> {
-  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`;
-  
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      callback_query_id: callbackQueryId,
-      text,
-    }),
-  });
+  if (!response.ok) {
+    throw new Error(`LINE file fetch error: ${response.status}`);
+  }
+
+  return response.arrayBuffer();
 }
 
 // ============ 主 Handler ============
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // 只接受 POST 請求
+    // CORS 預檢
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, x-line-signature, x-line-webhook-secret",
+        },
+      });
+    }
+
+    // 只接受 POST
     if (request.method !== "POST") {
       return new Response("OK", { status: 200 });
     }
 
     try {
-      const update: TelegramUpdate = await request.json();
+      // 驗證 LINE Webhook 簽章（可選）
+      const signature = request.headers.get("x-line-signature");
       
-      // 處理訊息
-      if (update.message) {
-        const chatId = update.message.chat.id;
-        const text = update.message.text;
-        const photo = update.message.photo;
-
-        // 獲取知識庫內容
-        const knowledgeBase = await fetchGoogleDocsContent(env);
-
-        // 有照片 → 圖片辨識
-        if (photo && photo.length > 0) {
-          // 獲取最大尺寸照片
-          const photoId = photo[photo.length - 1].file_id;
+      const body = await request.text();
+      const events: LINEWebhookEvent[] = JSON.parse(body).events || [];
+      
+      for (const event of events) {
+        if (event.type === "message" && event.message && event.replyToken) {
+          const messageType = event.message.type;
+          const replyToken = event.replyToken;
+          const userId = event.source.userId;
           
-          // 獲取檔案 URL
-          const fileResponse = await fetch(
-            `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${photoId}`
-          );
-          const fileData = await fileResponse.json() as any;
+          // 獲取知識庫
+          const knowledgeBase = await fetchGoogleDocsContent(env);
           
-          if (fileData.ok) {
-            const filePath = fileData.result.file_path;
-            const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`;
+          // 處理圖片訊息
+          if (messageType === "image") {
+            try {
+              const messageId = event.message.id;
+              const imageBuffer = await getLINEFileContent(messageId, env);
+              const base64 = btoa(String.fromCharCode(...new Uint8Array(imageBuffer)));
+              
+              const result = await callMiniMaxVision(
+                base64,
+                "請詳細分析這張工地照片是否符合職安法規要求。",
+                knowledgeBase,
+                env
+              );
+              
+              await replyToLINE(replyToken, [{ type: "text", text: result }], env);
+            } catch (error) {
+              console.error("Image processing error:", error);
+              await replyToLINE(replyToken, [{ type: "text", text: "⚠️ 圖片處理失敗，請稍後再試。" }], env);
+            }
+          }
+          // 處理文字訊息
+          else if (messageType === "text") {
+            const text = event.message.text?.trim() || "";
             
-            // 下載圖片並轉為 base64
-            const imageResponse = await fetch(fileUrl);
-            const imageBuffer = await imageResponse.arrayBuffer();
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(imageBuffer)));
+            if (!text || text === "?" || text === "help") {
+              const welcomeMsg = `🏭 <b>職安自動檢查與法規顧問</b>
+
+歡迎使用職安小幫手！
+
+📝 <b>使用方式：</b>
+• 直接輸入職安相關問題，我會為您查詢法規
+• 上傳工地照片，我會自動檢查是否有違規
+
+⚠️ 若規範未明確記載，請通報職安室確認。`;
+
+              await replyToLINE(replyToken, [{ type: "text", text: welcomeMsg }], env);
+              continue;
+            }
             
-            // 叫用 MiniMax Vision
-            const result = await callMiniMaxVision(base64, "請詳細分析這張工地照片是否符合職安法規要求。", knowledgeBase, env);
-            
-            await sendTelegramMessage(chatId, result, env);
+            try {
+              const result = await callMiniMaxText(text, knowledgeBase, env);
+              await replyToLINE(replyToken, [{ type: "text", text: result }], env);
+            } catch (error) {
+              console.error("Text processing error:", error);
+              await replyToLINE(replyToken, [{ type: "text", text: "⚠️ 系統忙碌中，請稍後再試。" }], env);
+            }
           }
         }
-        // 純文字 → 文字問答
-        else if (text) {
-          // 去掉 / 指令
-          const cleanText = text.replace(/^\/\w+\s*/, "").trim();
-          
-          if (!cleanText) {
-            await sendTelegramMessage(
-              chatId,
-              "🏭 <b>職安自動檢查與法規顧問</b>\n\n請輸入您的職安相關問題，我會為您查詢法規並提供建議。\n\n例如：「高空作業需要什麼防護具？」",
-              env
-            );
-            return new Response("OK", { status: 200 });
-          }
-
-          const result = await callMiniMaxText(cleanText, knowledgeBase, env);
-          await sendTelegramMessage(chatId, result, env);
-        }
-      }
-      // 處理 callback query
-      else if (update.callback_query) {
-        const callbackQueryId = update.callback_query.id;
-        const data = update.callback_query.data;
-        
-        await answerCallbackQuery(callbackQueryId, `您選擇了: ${data}`, env);
       }
 
     } catch (error) {
-      console.error("Error processing update:", error);
+      console.error("Webhook error:", error);
     }
 
     return new Response("OK", { status: 200 });
   },
-
-  // Webhook endpoint for Telegram
-  async webhook(request: Request, env: Env): Promise<Response> {
-    return this.fetch(request, env, {} as ExecutionContext);
-  }
 };
 
-// 聲明執行上下文類型
 interface ExecutionContext {
   waitUntil(promise: Promise<void>): void;
   passThroughOnException(): void;
