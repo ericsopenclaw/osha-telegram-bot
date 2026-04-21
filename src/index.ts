@@ -1,19 +1,20 @@
 /**
  * 職安自動檢查與法規顧問 LINE Bot - Cloudflare Worker
- * 使用 OpenAI API 進行文字問答與圖片辨識
+ * 使用 MiniMax API 進行文字問答與圖片辨識
  */
 
 interface Env {
   LINE_CHANNEL_ACCESS_TOKEN: string;
   LINE_CHANNEL_SECRET: string;
-  OPENAI_API_KEY: string;
+  MINIMAX_API_KEY: string;
+  MINIMAX_API_BASE: string;
   GOOGLE_DOCS_DOCUMENT_ID: string;
   WEBHOOK_SECRET: string;
 }
 
-// ============ OpenAI API ============
-async function callOpenAIText(prompt: string, context: string, env: Env): Promise<string> {
-  const url = "https://api.openai.com/v1/chat/completions";
+// ============ MiniMax API ============
+async function callMiniMaxText(prompt: string, context: string, env: Env): Promise<string> {
+  const url = `${env.MINIMAX_API_BASE}/v1/text/chatcompletion_v2`;
   
   const systemPrompt = `你是「職安自動檢查與法規顧問」，專門幫助工地現場人員解決職業安全與衛生法規問題。
 
@@ -29,11 +30,11 @@ ${context}`;
   const response = await fetch(url, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+      "Authorization": `Bearer ${env.MINIMAX_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "MiniMax-Text-01",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: prompt }
@@ -45,15 +46,15 @@ ${context}`;
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+    throw new Error(`MiniMax API error: ${response.status} - ${errorText}`);
   }
 
   const data = await response.json() as any;
   return data.choices?.[0]?.message?.content || "抱歉，系統暫時無法處理您的請求。";
 }
 
-async function callOpenAIVision(imageBase64: string, question: string, context: string, env: Env): Promise<string> {
-  const url = "https://api.openai.com/v1/chat/completions";
+async function callMiniMaxVision(imageBase64: string, question: string, context: string, env: Env): Promise<string> {
+  const url = `${env.MINIMAX_API_BASE}/v1/vision/chatcompletion_v2`;
 
   const systemPrompt = `你是「職安自動檢查與法規顧問」，專門分析工地照片並找出潛在的職業安全與衛生違規問題。
 
@@ -67,35 +68,34 @@ ${context}`;
   const response = await fetch(url, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+      "Authorization": `Bearer ${env.MINIMAX_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "MiniMax-VL-01",
       messages: [
         {
           role: "user",
           content: [
             {
-              type: "text",
-              text: systemPrompt + "\n\n" + `請分析這張工地照片是否違反職安法規。${question}`
+              type: "image_url",
+              image_url: { url: `data:image/jpeg;base64,${imageBase64}` }
             },
             {
-              type: "image_url",
-              image_url: {
-                url: `data:image/jpeg;base64,${imageBase64}`
-              }
+              type: "text",
+              text: `請分析這張工地照片是否違反職安法規。${question}`
             }
           ]
         }
       ],
+      temperature: 0.3,
       max_tokens: 600,
     }),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenAI Vision API error: ${response.status} - ${errorText}`);
+    throw new Error(`MiniMax Vision API error: ${response.status} - ${errorText}`);
   }
 
   const data = await response.json() as any;
@@ -212,7 +212,7 @@ export default {
               const imageBuffer = await getLINEFileContent(messageId, env);
               const base64 = Buffer.from(imageBuffer).toString("base64");
               
-              const result = await callOpenAIVision(
+              const result = await callMiniMaxVision(
                 base64,
                 "請詳細分析這張工地照片是否符合職安法規要求。",
                 knowledgeBase,
@@ -245,7 +245,7 @@ export default {
             }
             
             try {
-              const result = await callOpenAIText(text, knowledgeBase, env);
+              const result = await callMiniMaxText(text, knowledgeBase, env);
               await replyToLINE(replyToken, [{ type: "text", text: result }], env);
             } catch (error) {
               console.error("Text processing error:", error);
