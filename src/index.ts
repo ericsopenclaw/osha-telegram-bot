@@ -1,14 +1,58 @@
 /**
- * 職安自動檢查與法規顧問 LINE Bot - Cloudflare Worker
+ * 職安自動檢查與法規顧問 Telegram Bot - Cloudflare Worker
  * 使用 OpenAI API 進行文字問答與圖片辨識
  */
 
 interface Env {
-  LINE_CHANNEL_ACCESS_TOKEN: string;
-  LINE_CHANNEL_SECRET: string;
+  TELEGRAM_BOT_TOKEN: string;
   OPENAI_API_KEY: string;
   GOOGLE_DOCS_DOCUMENT_ID: string;
   WEBHOOK_SECRET: string;
+}
+
+// ============ Telegram API ============
+async function sendTelegramMessage(chatId: number, text: string, env: Env): Promise<void> {
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+  
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Telegram API error: ${response.status} - ${errorText}`);
+  }
+}
+
+async function getTelegramFile(fileId: string, env: Env): Promise<string> {
+  // 1. 取得檔案路徑
+  const fileResponse = await fetch(
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`
+  );
+  const fileData = await fileResponse.json() as any;
+  
+  if (!fileData.ok) {
+    throw new Error(`Telegram getFile error: ${fileData.description}`);
+  }
+  
+  return fileData.result.file_path;
+}
+
+async function downloadTelegramFile(filePath: string, env: Env): Promise<ArrayBuffer> {
+  const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`;
+  
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Telegram file download error: ${response.status}`);
+  }
+  
+  return response.arrayBuffer();
 }
 
 // ============ OpenAI API ============
@@ -137,44 +181,6 @@ async function fetchGoogleDocsContent(env: Env): Promise<string> {
   }
 }
 
-// ============ LINE API ============
-async function replyToLINE(replyToken: string, messages: any[], env: Env): Promise<void> {
-  const url = "https://api.line.me/v2/bot/message/reply";
-  
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${env.LINE_CHANNEL_ACCESS_TOKEN}`,
-    },
-    body: JSON.stringify({
-      replyToken,
-      messages,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`LINE API error: ${response.status} - ${errorText}`);
-  }
-}
-
-async function getLINEFileContent(messageId: string, env: Env): Promise<ArrayBuffer> {
-  const url = `https://api-data.line.me/v2/bot/message/${messageId}/content`;
-  
-  const response = await fetch(url, {
-    headers: {
-      "Authorization": `Bearer ${env.LINE_CHANNEL_ACCESS_TOKEN}`,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`LINE file fetch error: ${response.status}`);
-  }
-
-  return response.arrayBuffer();
-}
-
 // ============ Main Handler ============
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -184,7 +190,7 @@ export default {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, x-line-signature, x-line-webhook-secret",
+          "Access-Control-Allow-Headers": "Content-Type",
         },
       });
     }
@@ -194,43 +200,66 @@ export default {
     }
 
     try {
-      const signature = request.headers.get("x-line-signature");
-      const body = await request.text();
-      const events: any[] = JSON.parse(body).events || [];
+      const update = await request.json() as any;
       
-      for (const event of events) {
-        if (event.type === "message" && event.message && event.replyToken) {
-          const messageType = event.message.type;
-          const replyToken = event.replyToken;
-          
-          const knowledgeBase = await fetchGoogleDocsContent(env);
-          
-          // 處理圖片訊息
-          if (messageType === "image") {
-            try {
-              const messageId = event.message.id;
-              const imageBuffer = await getLINEFileContent(messageId, env);
-              const base64 = Buffer.from(imageBuffer).toString("base64");
-              
-              const result = await callOpenAIVision(
-                base64,
-                "請詳細分析這張工地照片是否符合職安法規要求。",
-                knowledgeBase,
-                env
-              );
-              
-              await replyToLINE(replyToken, [{ type: "text", text: result }], env);
-            } catch (error) {
-              console.error("Image processing error:", error);
-              await replyToLINE(replyToken, [{ type: "text", text: "⚠️ 圖片處理失敗，請稍後再試。" }], env);
-            }
-          }
-          // 處理文字訊息
-          else if (messageType === "text") {
-            const text = event.message.text?.trim() || "";
+      // 處理訊息
+      if (update.message) {
+        const chatId = update.message.chat.id;
+        const text = update.message.text;
+        const photo = update.message.photo;
+        const document = update.message.document;
+
+        // 獲取知識庫內容
+        const knowledgeBase = await fetchGoogleDocsContent(env);
+
+        // 有照片 → 圖片辨識
+        if (photo && photo.length > 0) {
+          try {
+            // 取得最大尺寸的照片
+            const photoId = photo[photo.length - 1].file_id;
+            const filePath = await getTelegramFile(photoId, env);
+            const imageBuffer = await downloadTelegramFile(filePath, env);
+            const base64 = Buffer.from(imageBuffer).toString("base64");
             
-            if (!text || text === "?" || text === "help") {
-              const welcomeMsg = `🏭 <b>職安自動檢查與法規顧問</b>
+            const result = await callOpenAIVision(
+              base64,
+              "請詳細分析這張工地照片是否符合職安法規要求。",
+              knowledgeBase,
+              env
+            );
+            
+            await sendTelegramMessage(chatId, result, env);
+          } catch (error) {
+            console.error("Image processing error:", error);
+            await sendTelegramMessage(chatId, "⚠️ 圖片處理失敗，請稍後再試。", env);
+          }
+        }
+        // 有文件 → 當作圖片處理
+        else if (document) {
+          try {
+            const filePath = await getTelegramFile(document.file_id, env);
+            const imageBuffer = await downloadTelegramFile(filePath, env);
+            const base64 = Buffer.from(imageBuffer).toString("base64");
+            
+            const result = await callOpenAIVision(
+              base64,
+              "請詳細分析這張圖片是否符合職安法規要求。",
+              knowledgeBase,
+              env
+            );
+            
+            await sendTelegramMessage(chatId, result, env);
+          } catch (error) {
+            console.error("Document processing error:", error);
+            await sendTelegramMessage(chatId, "⚠️ 文件處理失敗，請稍後再試。", env);
+          }
+        }
+        // 純文字 → 文字問答
+        else if (text) {
+          const cleanText = text.replace(/^\/\w+\s*/, "").trim();
+          
+          if (!cleanText || cleanText === "?" || cleanText === "help" || cleanText === "/start") {
+            const welcomeMsg = `🏭 <b>職安自動檢查與法規顧問</b>
 
 歡迎使用職安小幫手！
 
@@ -240,17 +269,16 @@ export default {
 
 ⚠️ 若規範未明確記載，請通報職安室確認。`;
 
-              await replyToLINE(replyToken, [{ type: "text", text: welcomeMsg }], env);
-              continue;
-            }
-            
-            try {
-              const result = await callOpenAIText(text, knowledgeBase, env);
-              await replyToLINE(replyToken, [{ type: "text", text: result }], env);
-            } catch (error) {
-              console.error("Text processing error:", error);
-              await replyToLINE(replyToken, [{ type: "text", text: "⚠️ 系統忙碌中，請稍後再試。" }], env);
-            }
+            await sendTelegramMessage(chatId, welcomeMsg, env);
+            return new Response("OK", { status: 200 });
+          }
+
+          try {
+            const result = await callOpenAIText(cleanText, knowledgeBase, env);
+            await sendTelegramMessage(chatId, result, env);
+          } catch (error) {
+            console.error("Text processing error:", error);
+            await sendTelegramMessage(chatId, "⚠️ 系統忙碌中，請稍後再試。", env);
           }
         }
       }
