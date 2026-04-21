@@ -1,0 +1,19 @@
+name = "osha-telegram-bot"
+main = "src/index.ts"
+compatibility_date = "2024-06-20"
+account_id = ""
+
+[vars]
+TELEGRAM_BOT_TOKEN = ""
+MINIMAX_API_KEY = ""
+MINIMAX_API_BASE = "https://api.minimax.chat"
+GOOGLE_DOCS_DOCUMENT_ID = "1Dn4U45QfY9Bonb96g5G-wWoE5wvB9qj2"
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "OSHA_KV"
+id = ""
+
+# Durable Objects
+[[durable_objects]]
+class_name = "BotState"
